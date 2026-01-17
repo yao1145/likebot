@@ -33,7 +33,6 @@ class BlogSearchBot:
             return False
   
     def navigate_to_blog(self):
-        # ... (保持原有代码不变) ...
         """导航到博客区"""
         try:
             time.sleep(2)

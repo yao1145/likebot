@@ -6,7 +6,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.options import Options  # 用于设置无头模式
 import time
 import pandas as pd
-import csv  # 用于实时写入
+import csv
 from tqdm import tqdm
 
 class BlogSearchBot:
@@ -14,7 +14,6 @@ class BlogSearchBot:
         self.base_url = base_url
         self.username = username
         self.password = password
-        # 初始化普通有头浏览器
         self.driver = webdriver.Chrome() 
         self.wait = WebDriverWait(self.driver, 10)
         self.cookies = [] # 用于存储登录后的cookie
@@ -33,7 +32,6 @@ class BlogSearchBot:
         
             self.wait.until(EC.url_contains("/"))
             print("登录成功！保存Cookies...")
-            # 【新增】保存登录后的Cookie
             self.cookies = self.driver.get_cookies()
             return True
 
@@ -102,7 +100,7 @@ class BlogSearchBot:
             print(f"列表保存失败: {e}")
 
     def switch_to_headless(self):
-        """【新增】切换到无头浏览器模式并注入Cookie"""
+        """切换到无头浏览器模式并注入Cookie"""
         print("\n正在切换到无头浏览器模式(Headless Mode)...")
         
         # 1. 关闭旧的有头浏览器
@@ -113,14 +111,10 @@ class BlogSearchBot:
         chrome_options.add_argument("--headless")  # 开启无头
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
-        # 某些网站可能需要模拟User-Agent防止反爬
         chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
-        # 1. 页面加载策略：eager 
-        # (DOM加载完就返回，不等待图片、CSS加载完成，速度显著提升)
         chrome_options.page_load_strategy = 'eager' 
 
-        # 2. 禁止加载图片和 CSS
+        # 禁止加载图片和 CSS
         prefs = {
             "profile.managed_default_content_settings.images": 2, # 禁止图片
             "profile.managed_default_content_settings.stylesheets": 2, # 禁止CSS (慎用，有时会影响内容定位)
@@ -131,12 +125,9 @@ class BlogSearchBot:
         self.driver = webdriver.Chrome(options=chrome_options)
         self.wait = WebDriverWait(self.driver, 10) # 更新 wait 对象
 
-        # 4. 注入Cookie (需要先访问同一个域名的页面才能设置Cookie)
+        # 4. 注入Cookie
         try:
-            # 先访问登录页或首页，建立域名上下文
             self.driver.get(f"{self.base_url}/auth/login") 
-            
-            # 删除旧Cookie并添加之前保存的登录Cookie
             self.driver.delete_all_cookies()
             for cookie in self.cookies:
                 self.driver.add_cookie(cookie)
@@ -146,14 +137,11 @@ class BlogSearchBot:
             print(f"Cookie注入失败: {e}")
 
     def scrape_details_realtime(self, articles_data, filename="article_details.csv"):
-        """【新增】访问详情页并实时写入CSV"""
+        """访问详情页并实时写入CSV"""
         print(f"开始抓取详情内容，目标文件: {filename}")
         
-        # 使用 'w' 模式打开文件，newline='' 防止空行
-        # buffering=1 表示行缓冲（虽然csv模块自己管理，但加上是个好习惯）
         with open(filename, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
-            # 写入表头
             writer.writerow(['作者', '文章链接', '文章标题', '文章内容'])
             
             # 遍历文章列表
@@ -165,7 +153,7 @@ class BlogSearchBot:
 
                 try:
                     self.driver.get(url)
-                    
+
                     try:
                         title_elem = self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
                         title = title_elem.text.strip()
@@ -176,17 +164,15 @@ class BlogSearchBot:
                         content_elem = self.driver.find_element(By.ID, "userContentContainer")
                         content = content_elem.text.strip()
                         
-                        # 如果内容太长，为了CSV可读性，可以选择只截取前500字，或者保留全部
                     except NoSuchElementException:
                         content = "未找到正文内容"
 
                 except Exception as e:
                     tqdm.write(f"访问 {url} 失败: {e}")
                 
-                # 【关键】实时写入一行
+                # 实时写入一行
                 writer.writerow([author, url, title, content])
                 
-                # 稍微休眠一下，避免请求过快被封
                 time.sleep(0.5)
 
         print(f"\n所有内容抓取完成！已保存至 {filename}")
