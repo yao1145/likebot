@@ -172,8 +172,6 @@ class BlogSearchBot:
                 
                 # 实时写入一行
                 writer.writerow([author, url, title, content])
-                
-                time.sleep(0.5)
 
         print(f"\n所有内容抓取完成！已保存至 {filename}")
 
