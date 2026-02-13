@@ -2,213 +2,203 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from selenium.webdriver.chrome.options import Options  # 用于设置无头模式
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from requests.exceptions import Timeout, ConnectionError, ProxyError, RequestException
 import time
-import pandas as pd
 import csv
+import pandas as pd
 from tqdm import tqdm
 
-class BlogSearchBot:
+class BlogContentBot:
     def __init__(self, base_url, username, password):
-        self.base_url = base_url
+        self.base_url = base_url.rstrip('/')
         self.username = username
         self.password = password
-        self.driver = webdriver.Chrome() 
-        self.wait = WebDriverWait(self.driver, 10)
-        self.cookies = [] # 用于存储登录后的cookie
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+
+    def login_and_get_cookies(self):
+        """Selenium 登录并获取 Cookie"""
+        print("正在启动浏览器进行登录...")
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless") 
+        options.add_argument("--disable-gpu")
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
   
-    def login(self):
-        """登录网站并保存Cookie"""
+        driver = webdriver.Chrome(options=options)
+        wait = WebDriverWait(driver, 10)
+
         try:
-            self.driver.get(f"{self.base_url}/auth/login")
-        
-            username_input = self.wait.until(EC.presence_of_element_located((By.ID, "username")))
-            password_input = self.driver.find_element(By.ID, "password")
-            username_input.send_keys(self.username)
-            password_input.send_keys(self.password)
-            login_button = self.driver.find_element(By.ID, "submitBtn")
-            login_button.click()
-        
-            self.wait.until(EC.url_contains("/"))
-            print("登录成功！保存Cookies...")
-            self.cookies = self.driver.get_cookies()
+            driver.get(f"{self.base_url}/auth/login")
+
+            wait.until(EC.presence_of_element_located((By.ID, "username"))).send_keys(self.username)
+            driver.find_element(By.ID, "password").send_keys(self.password)
+            driver.find_element(By.ID, "submitBtn").click()
+            wait.until(EC.url_contains("/"))
+            time.sleep(1) 
+  
+            selenium_cookies = driver.get_cookies()
+            for cookie in selenium_cookies:
+                self.session.cookies.set(cookie['name'], cookie['value'])
+  
+            print("登录成功，Cookie 已提取")
             return True
 
-        except TimeoutException:
-            print("登录失败或超时")
-            return False
-  
-    def navigate_to_blog(self):
-        """导航到博客区"""
-        try:
-            time.sleep(2)
-            blog_link = self.wait.until(
-                EC.element_to_be_clickable((By.LINK_TEXT, "博客"))
-            )
-            blog_link.click()
-            self.wait.until(EC.url_contains("/blog"))
-            print("成功进入博客区!")
-            return True
-        except TimeoutException:
-            print("无法进入博客区")
-            return False
-  
-    def find_admin_articles(self):
-        """查找文章列表"""
-        try:
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
-            self.driver.execute_script("window.scrollTo(0, 0);")
-
-            articles = []
-            elements = self.driver.find_elements(By.TAG_NAME, "article")
-            if elements:
-                articles = elements
-                print(f"找到 {len(articles)} 个文章元素")
-            else:
-                print(f"未找到文章")
-        
-            print(f"\n开始解析列表...")
-            admin_articles = []
-        
-            # 解析列表数据
-            for i, article in enumerate(tqdm(articles, desc="解析列表", unit="篇")):
-                try:
-                    author_element = article.find_element(By.CSS_SELECTOR, "[class*='author']")
-                    author = author_element.text.strip().split('\n')[0]
-                    link = article.find_element(By.TAG_NAME, "a")
-                    url = link.get_attribute("href")
-                    admin_articles.append({'author': author, 'url': url})
-                except Exception as e:
-                    tqdm.write(f"解析文章 {i+1} 失败: {e}")
-                    continue
-            
-            return admin_articles
-        
         except Exception as e:
-            print(f"查找文章时出错: {e}")
+            print(f"登录失败: {e}")
+            return False
+
+        finally:
+            driver.quit()
+
+    def load_articles_from_file(self, filename="admin_articles.csv"):
+        """从文件加载文章 URL"""
+        try:
+            lines = []
+            df = pd.read_csv(filename)
+            for i in df.index:
+                lines.append(df["文章链接"][i])
+            print("文章目录读取成功")
+            return lines  
+
+        except FileNotFoundError:
             return []
 
-    def save_list_to_csv(self, articles_data, filename="admin_articles.csv"):
-        """保存初步列表"""
+    def blog_article_api(self, article_url, writer=None):
+        """
+        核心爬取请求
+        返回: (是否成功, url, 是否需要重试)
+        """
+        target_id = article_url.rstrip('/').split('/')[-1]
+        target_url = f"{self.base_url}/blog/spider/blogs/{target_id}"
+        headers = {"Referer": article_url}
+  
         try:
-            df = pd.DataFrame(articles_data)
+            response = self.session.get(target_url, headers=headers, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    blog_id = target_id
+                    blog_title = data["meta"]["title"]
+                    blog_author = data["meta"]["author"]
+                    blog_content = data["meta"]["content"]
+                    blog_date = data["meta"]["date"]
+                    if writer:
+                        writer.writerow([blog_author, blog_id, blog_title, blog_content, blog_date])
+                    return True, article_url, False
+                else:
+                    return False, article_url, False # 数据为空，不重试
+            elif response.status_code in [500, 502, 503, 504]:
+                return False, article_url, True # 服务器错误，重试
+            else:
+                return False, article_url, False # 403/404 等，不重试
+
+        except (Timeout, ConnectionError, ProxyError):
+            return False, article_url, True # 网络错误，重试
+        except RequestException:
+            return False, article_url, False # 其它错误，不重试
+
+    def csv_process(self, filename):
+        '''csv尾处理'''
+        try:
+            df = pd.read_csv(filename, encoding='utf-8-sig')
+            df = df.sort_values(by="文章作者", ascending=True)
             df.to_csv(filename, index=False, encoding='utf-8-sig')
-            print(f"文章列表已保存到 {filename}")
-        except Exception as e:
-            print(f"列表保存失败: {e}")
+            print("文章内容爬取完毕")
+            return True
 
-    def switch_to_headless(self):
-        """切换到无头浏览器模式并注入Cookie"""
-        print("\n正在切换到无头浏览器模式(Headless Mode)...")
-        
-        # 1. 关闭旧的有头浏览器
-        self.driver.quit()
-
-        # 2. 配置无头模式
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")  # 开启无头
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-        chrome_options.page_load_strategy = 'eager' 
-
-        # 禁止加载图片和 CSS
-        prefs = {
-            "profile.managed_default_content_settings.images": 2, # 禁止图片
-            "profile.managed_default_content_settings.stylesheets": 2, # 禁止CSS (慎用，有时会影响内容定位)
-        }
-        chrome_options.add_experimental_option("prefs", prefs)        
-        
-        # 3. 启动新浏览器
-        self.driver = webdriver.Chrome(options=chrome_options)
-        self.wait = WebDriverWait(self.driver, 10) # 更新 wait 对象
-
-        # 4. 注入Cookie
-        try:
-            self.driver.get(f"{self.base_url}/auth/login") 
-            self.driver.delete_all_cookies()
-            for cookie in self.cookies:
-                self.driver.add_cookie(cookie)
-            
-            print("Cookie注入完成，准备抓取详情...")
-        except Exception as e:
-            print(f"Cookie注入失败: {e}")
-
-    def scrape_details_realtime(self, articles_data, filename="article_details.csv"):
-        """访问详情页并实时写入CSV"""
-        print(f"开始抓取详情内容，目标文件: {filename}")
-        
-        with open(filename, mode='w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            writer.writerow(['作者', '文章链接', '文章标题', '文章内容'])
-            
-            # 遍历文章列表
-            for item in tqdm(articles_data, desc="抓取内容", unit="页"):
-                url = item['url']
-                author = item['author']
-                title = "未获取"
-                content = "未获取"
-
-                try:
-                    self.driver.get(url)
-
-                    try:
-                        title_elem = self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
-                        title = title_elem.text.strip()
-                    except:
-                        title = "无标题"
-
-                    try:
-                        content_elem = self.driver.find_element(By.ID, "userContentContainer")
-                        content = content_elem.text.strip()
-                        
-                    except NoSuchElementException:
-                        content = "未找到正文内容"
-
-                except Exception as e:
-                    tqdm.write(f"访问 {url} 失败: {e}")
-                
-                # 实时写入一行
-                writer.writerow([author, url, title, content])
-
-        print(f"\n所有内容抓取完成！已保存至 {filename}")
+        except FileNotFoundError:
+            print("未找到博客文章")
+            return False
 
     def run(self):
-        """执行完整流程"""
-        try:
-            # 1. 登录 (GUI模式)
-            if not self.login(): return
-        
-            # 2. 进入列表 (GUI模式)
-            if not self.navigate_to_blog(): return
-        
-            # 3. 获取链接列表 (GUI模式)
-            articles_data = self.find_admin_articles()
-            if not articles_data:
-                print("未找到任何文章，程序结束。")
-                return
+        '''主运行函数'''
+        start_time = time.time()
+        print("欢迎使用yaozi开发的博客爬取机器人！\n")
+  
+        # 登录，获取Cookies
+        if not self.login_and_get_cookies():
+            return
 
-            # 4. 保存链接列表到文件
-            self.save_list_to_csv(articles_data)
-
-            # 5. 切换到无头模式 (为了效率和静默运行)
-            self.switch_to_headless()
-
-            # 6. 遍历链接，爬取内容并实时写入
-            self.scrape_details_realtime(articles_data)
+        # 读取文章目录
+        pending_articles = self.load_articles_from_file()
+        total_initial = len(pending_articles)
+        if total_initial == 0: 
+            print("没有读取到文章目录")
+            return
         
-        finally:
-            # 关闭浏览器
-            print("正在清理资源...")
-            time.sleep(2)
-            self.driver.quit()
+        # 博客内容爬取
+        max_rounds = 5  # 最大清洗轮数
+        success_total = 0
+        filename = "article_details.csv"
+
+        with open(filename, mode='w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            writer.writerow(['文章作者', '文章id', '文章标题', '文章内容', '发布日期'])   
+
+            for round_idx in range(1, max_rounds + 1):
+                if not pending_articles:
+                    break
+
+                current_total = len(pending_articles)
+                retry_list = [] 
+                round_success = 0
+                round_fail = 0
+                print(f"第 {round_idx}/{max_rounds} 轮清洗开始 (待处理: {current_total}) ---")
+  
+                # 开启线程池，进行内容爬取
+                with ThreadPoolExecutor(max_workers = 5) as executor:
+                    future_to_url = {executor.submit(self.blog_article_api, url, writer): url for url in pending_articles}
+                    pbar = tqdm(total=current_total, unit='篇', desc=f'第{round_idx}轮', ncols=100, colour='green')
+                    for future in as_completed(future_to_url):
+                        is_success, url, should_retry = future.result()
+                        if is_success:
+                            success_total += 1
+                            round_success += 1
+                        else:
+                            round_fail += 1
+                            if should_retry:
+                                retry_list.append(url)
+                        pbar.update(1)
+                        pbar.set_postfix(成功=round_success, 失败=round_fail, 待重试=len(retry_list))
+                    pbar.close()
+
+                # 更新待处理列表
+                pending_articles = retry_list
+                if pending_articles:
+                    time.sleep(1)
+
+        # 尾处理
+        if not self.csv_process(filename):
+            return
+
+        # 计算耗时
+        end_time = time.time()
+        total_time = end_time - start_time
+
+        # 最终报告
+        print("最终任务报告")
+        print(f"总文章数 : {total_initial}")
+        print(f"成功爬取 : {success_total}")
+        print(f"成功率 : {success_total / total_initial:.2%}")
+        print(f"耗时 : {total_time:.2f} 秒")
+  
+        # 失败文章导出
+        if pending_articles:
+            print(f"有 {len(pending_articles)} 篇失败，已保存至 failed_urls.txt")
+            with open("failed_urls.txt", "w", encoding="utf-8-sig") as f:
+                for url in pending_articles:
+                    f.write(url + "\n")
+        else:
+            print("所有文章处理完毕！")
 
 if __name__ == "__main__":
-    bot = BlogSearchBot(
-        base_url="http://116.62.179.232:22822", # 请替换为实际地址
-        username="H4C3O4",
-        password="h4c3o4",
+    bot = BlogContentBot(
+        base_url="base_url",
+        username="username",
+        password="password",
     )
     bot.run()

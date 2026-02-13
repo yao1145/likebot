@@ -118,8 +118,8 @@ class BlogSearchBot:
 
 if __name__ == "__main__":
     bot = BlogSearchBot(
-        base_url="http://116.62.179.232:22822",
-        username="H4C3O4",
-        password="h4c3o4",
+        base_url="base_url",
+        username="username",
+        password="password",
     )
     bot.run()
